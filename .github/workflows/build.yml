@@ -1,0 +1,54 @@
+name: Build and Push Docker Image
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Environment to build (dev, qa, uat, prod)'
+        required: true
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: us-east-2
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions
+
+      - name: Load Variables from TFVARS
+        id: load-tfvars
+        run: |
+          # Use workflow_dispatch input if present, else default to 'dev' for automatic trigger
+          ENV=${{ github.event.inputs.env || 'dev' }}
+          ENV_FILE="terraform/$ENV.tfvars"
+          echo "Loading variables from $ENV_FILE"
+          while IFS="=" read -r key value
+          do
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+            key=$(echo $key | xargs)
+            value=$(echo $value | tr -d '"' | xargs)
+            echo "$key=$value" >> $GITHUB_ENV
+          done
+          echo "ENV=$ENV" >> $GITHUB_ENV
+
+      - name: Login to ECR
+        uses: aws-actions/amazon-ecr-login@v2
+
+      - name: Build and Push Docker Image
+        run: |
+          IMAGE_TAG=${GITHUB_SHA::8}
+          echo "Building $ecr_repo:$IMAGE_TAG"
+          docker build -t $ecr_repo:$IMAGE_TAG .
+          docker push $ecr_repo:$IMAGE_TAG
+          echo "IMAGE_TAG=$IMAGE_TAG" >> $GITHUB_ENV
+
+      - name: Output
+        run: echo "Docker image pushed: $ecr_repo:$IMAGE_TAG"
