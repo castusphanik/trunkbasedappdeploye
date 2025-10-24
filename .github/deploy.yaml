@@ -1,0 +1,78 @@
+name: Deploy to ECS
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+    inputs:
+      env:
+        description: 'Environment to deploy'
+        required: true
+      rollback:
+        description: 'Optional rollback image tag'
+        required: false
+
+jobs:
+  deploy:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Configure AWS
+        uses: aws-actions/configure-aws-credentials@v2
+        with:
+          aws-region: us-east-2
+          role-to-assume: arn:aws:iam::123456789012:role/github-actions
+
+      - name: Load Variables from TFVARS
+        id: load-tfvars
+        run: |
+          ENV=${{ github.event.inputs.env || 'dev' }}
+          ENV_FILE="terraform/$ENV.tfvars"
+          echo "Loading variables from $ENV_FILE"
+          while IFS="=" read -r key value
+          do
+            [[ "$key" =~ ^#.*$ || -z "$key" ]] && continue
+            key=$(echo $key | xargs)
+            value=$(echo $value | tr -d '"' | xargs)
+            echo "$key=$value" >> $GITHUB_ENV
+          done
+          echo "ENV=$ENV" >> $GITHUB_ENV
+          echo "Rollback=${{ github.event.inputs.rollback || '' }}" >> $GITHUB_ENV
+
+  approval:
+    if: ${{ github.event.inputs.env == 'uat' || github.event.inputs.env == 'prod' }}
+    needs: deploy
+    runs-on: ubuntu-latest
+    environment:
+      name: ${{ github.event.inputs.env }}
+    steps:
+      - name: Await Manual Approval
+        run: echo "Manual approval required for ${{ github.event.inputs.env }}"
+
+  ecs-deploy:
+    needs: approval
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+
+      - name: Deploy ECS Task
+        run: |
+          IMAGE_TAG=${Rollback:-${GITHUB_SHA::8}}
+          echo "Deploying $ecr_repo:$IMAGE_TAG to $ecs_cluster/$ecs_service"
+
+          # Register a new task definition
+          aws ecs register-task-definition \
+            --family $task_family \
+            --container-definitions "[{\"name\":\"$container_name\",\"image\":\"$ecr_repo:$IMAGE_TAG\",\"essential\":true}]" \
+            --region $aws_region
+
+          # Force ECS service update
+          aws ecs update-service \
+            --cluster $ecs_cluster \
+            --service $ecs_service \
+            --force-new-deployment \
+            --region $aws_region
